@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#000000" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Camera AI Bố cục</title>
+
+  <!-- Manifest PWA (đường dẫn tương đối để chạy được trên GitHub Pages subpath) -->
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="icon" type="image/svg+xml" href="./icon.svg" />
+  <link rel="apple-touch-icon" href="./icon.svg" />
+
+  <!-- Tailwind CDN (được Service Worker cache để chạy offline) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    /* Khoá toàn màn hình, nền đen như app camera */
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: #000;
+      overflow: hidden;
+      overscroll-behavior: none;
+      -webkit-user-select: none;
+      user-select: none;
+      touch-action: manipulation;
+    }
+    /* Video full-screen, cắt theo object-fit: cover để phủ kín khung dọc */
+    #video {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      background: #000;
+    }
+    /* Canvas overlay đè lên video: vẽ lưới 1/3, bounding box, viền báo hiệu */
+    #overlay {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+    /* Hiệu ứng flash khi chụp ảnh */
+    #flash {
+      position: absolute;
+      inset: 0;
+      background: #fff;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 90ms ease-out;
+    }
+    #flash.active { opacity: 0.9; transition: none; }
+  </style>
+</head>
+<body>
+  <!-- ===================== LỚP CAMERA ===================== -->
+  <video id="video" playsinline muted autoplay></video>
+  <canvas id="overlay"></canvas>
+  <div id="flash"></div>
+
+  <!-- Canvas ẩn để chụp fallback ở độ phân giải native của track -->
+  <canvas id="captureCanvas" class="hidden"></canvas>
+
+  <!-- ===================== HUD (giao diện đè lên) ===================== -->
+  <div class="absolute inset-0 flex flex-col justify-between pointer-events-none"
+       style="padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom);">
+
+    <!-- Thanh trên: badge trạng thái AI + badge offline -->
+    <div class="flex items-center justify-between p-3">
+      <div id="aiBadge"
+           class="pointer-events-auto flex items-center gap-2 px-3 py-1.5 rounded-full bg-black/50 backdrop-blur text-white text-xs font-medium">
+        <span id="aiDot" class="w-2.5 h-2.5 rounded-full bg-yellow-400 animate-pulse"></span>
+        <span id="aiText">Đang tải AI…</span>
+      </div>
+      <div id="netBadge"
+           class="pointer-events-auto px-3 py-1.5 rounded-full bg-black/50 backdrop-blur text-white text-xs font-medium">
+        <span id="netText">•</span>
+      </div>
+    </div>
+
+    <!-- Thông báo hướng dẫn bố cục (giữa màn hình, phía dưới) -->
+    <div class="flex-1 flex items-end justify-center pb-2">
+      <div id="guide"
+           class="px-4 py-2 rounded-2xl bg-black/55 backdrop-blur text-white text-base font-semibold text-center shadow-lg transition-all duration-200">
+        Hướng máy vào chủ thể…
+      </div>
+    </div>
+
+    <!-- Thanh dưới: zoom + nút chụp + thumbnail -->
+    <div class="p-4 space-y-3">
+      <!-- Thanh trượt zoom (ẩn mặc định, chỉ hiện nếu phần cứng hỗ trợ) -->
+      <div id="zoomWrap" class="hidden pointer-events-auto flex items-center gap-3 px-2">
+        <span class="text-white text-xs">🔍</span>
+        <input id="zoom" type="range" min="1" max="1" step="0.1" value="1"
+               class="flex-1 accent-white h-1.5" />
+        <span id="zoomVal" class="text-white text-xs w-10 text-right">1.0x</span>
+      </div>
+
+      <div class="flex items-center justify-between">
+        <!-- Thumbnail ảnh vừa chụp + nút tải về -->
+        <a id="thumbLink" href="#" download="anh-camera.jpg"
+           class="pointer-events-auto w-14 h-14 rounded-xl overflow-hidden border-2 border-white/60 bg-black/40 hidden">
+          <img id="thumb" alt="Ảnh vừa chụp" class="w-full h-full object-cover" />
+        </a>
+        <div id="thumbPlaceholder" class="w-14 h-14"></div>
+
+        <!-- Nút chụp lớn -->
+        <button id="shutter"
+                class="pointer-events-auto w-20 h-20 rounded-full bg-white/95 active:scale-95 transition-transform ring-4 ring-white/40 flex items-center justify-center">
+          <span class="w-16 h-16 rounded-full border-4 border-black/20 bg-white"></span>
+        </button>
+
+        <!-- Nút chuyển camera trước/sau -->
+        <button id="flip"
+                class="pointer-events-auto w-14 h-14 rounded-full bg-black/50 backdrop-blur text-white text-2xl flex items-center justify-center active:scale-95 transition-transform">
+          🔄
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================== LOGIC JAVASCRIPT (ES Module) ===================== -->
+  <script type="module">
+    // Import MediaPipe Tasks Vision từ CDN (ghim version cụ thể để cache ổn định).
+    import { FilesetResolver, ObjectDetector }
+      from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+    // ------- Tham chiếu DOM -------
+    const video        = document.getElementById("video");
+    const overlay      = document.getElementById("overlay");
+    const octx         = overlay.getContext("2d");
+    const captureCanvas= document.getElementById("captureCanvas");
+    const flash        = document.getElementById("flash");
+    const guide        = document.getElementById("guide");
+    const shutter      = document.getElementById("shutter");
+    const flipBtn      = document.getElementById("flip");
+    const zoomWrap     = document.getElementById("zoomWrap");
+    const zoomInput    = document.getElementById("zoom");
+    const zoomVal      = document.getElementById("zoomVal");
+    const thumbLink    = document.getElementById("thumbLink");
+    const thumb        = document.getElementById("thumb");
+    const aiDot        = document.getElementById("aiDot");
+    const aiText       = document.getElementById("aiText");
+    const netText      = document.getElementById("netText");
+
+    // ------- Trạng thái toàn cục -------
+    let videoTrack   = null;          // MediaStreamTrack camera đang dùng
+    let imageCapture = null;          // ImageCapture API (Chrome)
+    let detector     = null;          // MediaPipe ObjectDetector
+    let currentFacing= "environment"; // camera đang bật (sau/trước)
+    let lastVideoTime= -1;            // để chỉ detect khi có frame mới
+    let lastGuideMsg = "";            // debounce thông báo bố cục
+
+    // =========================================================
+    // BƯỚC 1 — KHỞI ĐỘNG CAMERA PHẦN CỨNG
+    // =========================================================
+    async function startCamera(facing = "environment") {
+      // Dừng stream cũ (nếu có) trước khi mở stream mới
+      stopStream();
+
+      // Ràng buộc mong muốn: ưu tiên camera sau, độ phân giải cao,
+      // lấy nét liên tục (đặt trong advanced vì focusMode chưa chuẩn hoá).
+      const buildConstraints = (facingValue) => ({
+        audio: false,
+        video: {
+          facingMode: facingValue,
+          width:  { ideal: 4096 },
+          height: { ideal: 2160 },
+          advanced: [{ focusMode: "continuous" }]
+        }
+      });
+
+      // Chuỗi fallback để app không "chết" trên desktop/thiết bị thiếu camera sau.
+      const attempts = facing === "environment"
+        ? [ { exact: "environment" }, "environment", "user" ]
+        : [ { exact: "user" }, "user", "environment" ];
+
+      let stream = null, lastErr = null;
+      for (const f of attempts) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia(buildConstraints(f));
+          currentFacing = (typeof f === "string") ? f : f.exact;
+          break;
+        } catch (err) {
+          lastErr = err;
+          // OverconstrainedError / NotFoundError → thử phương án tiếp theo
+        }
+      }
+
+      if (!stream) {
+        console.error("Không mở được camera:", lastErr);
+        guide.textContent = "⚠️ Không truy cập được camera. Kiểm tra quyền & HTTPS.";
+        return;
+      }
+
+      video.srcObject = stream;
+      videoTrack = stream.getVideoTracks()[0];
+
+      await video.play().catch(() => {});
+      await waitForVideoReady();
+      resizeOverlay();
+
+      // Cấu hình khả năng phần cứng: zoom + focus liên tục
+      setupCapabilities();
+
+      // Chuẩn bị ImageCapture (Chrome-only) để chụp ảnh chất lượng cao
+      try {
+        imageCapture = ("ImageCapture" in window) ? new ImageCapture(videoTrack) : null;
+      } catch { imageCapture = null; }
+    }
+
+    // Đợi video có kích thước thực (videoWidth > 0) để tính toạ độ chính xác
+    function waitForVideoReady() {
+      return new Promise((resolve) => {
+        if (video.videoWidth > 0) return resolve();
+        video.onloadedmetadata = () => resolve();
+      });
+    }
+
+    function stopStream() {
+      if (video.srcObject) {
+        video.srcObject.getTracks().forEach(t => t.stop());
+        video.srcObject = null;
+      }
+      videoTrack = null;
+      imageCapture = null;
+    }
+
+    // Đọc getCapabilities() → bật slider zoom & lấy nét liên tục nếu có
+    function setupCapabilities() {
+      if (!videoTrack || !videoTrack.getCapabilities) return;
+      let caps = {};
+      try { caps = videoTrack.getCapabilities(); } catch { caps = {}; }
+
+      // ----- Zoom -----
+      if (caps.zoom && typeof caps.zoom.max === "number" && caps.zoom.max > caps.zoom.min) {
+        const settings = videoTrack.getSettings ? videoTrack.getSettings() : {};
+        zoomInput.min   = caps.zoom.min;
+        zoomInput.max   = caps.zoom.max;
+        zoomInput.step  = caps.zoom.step || 0.1;
+        zoomInput.value = settings.zoom || caps.zoom.min;
+        zoomVal.textContent = Number(zoomInput.value).toFixed(1) + "x";
+        zoomWrap.classList.remove("hidden");
+        zoomInput.oninput = async () => {
+          const z = Number(zoomInput.value);
+          zoomVal.textContent = z.toFixed(1) + "x";
+          try { await videoTrack.applyConstraints({ advanced: [{ zoom: z }] }); } catch {}
+        };
+      } else {
+        zoomWrap.classList.add("hidden");
+      }
+
+      // ----- Lấy nét liên tục -----
+      if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
+        videoTrack.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => {});
+      }
+    }
+
+    // =========================================================
+    // CHỤP ẢNH — ImageCapture.takePhoto() + fallback canvas
+    // =========================================================
+    async function capture() {
+      if (!videoTrack) return;
+      doFlash();
+
+      let blob = null;
+
+      // Cách 1: ImageCapture.takePhoto() (chất lượng cao nhất, khai thác phần cứng)
+      if (imageCapture) {
+        try {
+          let photoSettings = {};
+          try {
+            const pc = await imageCapture.getPhotoCapabilities();
+            if (pc && pc.imageWidth && pc.imageWidth.max) {
+              photoSettings = {
+                imageWidth:  pc.imageWidth.max,
+                imageHeight: pc.imageHeight ? pc.imageHeight.max : undefined
+              };
+            }
+          } catch {}
+          blob = await imageCapture.takePhoto(photoSettings);
+        } catch (err) {
+          console.warn("takePhoto lỗi, dùng fallback canvas:", err);
+          blob = null;
+        }
+      }
+
+      // Cách 2 (fallback): vẽ frame video lên canvas ở độ phân giải native → JPEG
+      if (!blob) {
+        const s = videoTrack.getSettings ? videoTrack.getSettings() : {};
+        const w = s.width  || video.videoWidth  || 1920;
+        const h = s.height || video.videoHeight || 1080;
+        captureCanvas.width = w;
+        captureCanvas.height = h;
+        const cctx = captureCanvas.getContext("2d");
+        cctx.drawImage(video, 0, 0, w, h);
+        blob = await new Promise(res => captureCanvas.toBlob(res, "image/jpeg", 0.95));
+      }
+
+      if (!blob) return;
+
+      // Hiển thị thumbnail + tạo link tải về
+      const url = URL.createObjectURL(blob);
+      thumb.src = url;
+      thumbLink.href = url;
+      thumbLink.download = "anh-camera-" + Date.now() + ".jpg";
+      thumbLink.classList.remove("hidden");
+    }
+
+    function doFlash() {
+      flash.classList.add("active");
+      requestAnimationFrame(() => {
+        flash.classList.remove("active"); // để transition mờ dần đưa opacity về 0
+      });
+    }
+
+    // =========================================================
+    // BƯỚC 2 — KHỞI TẠO MEDIAPIPE OBJECT DETECTION
+    // =========================================================
+    async function initDetector() {
+      setAiStatus("loading", "Đang tải AI…");
+      try {
+        // Tải bộ WASM của Tasks Vision (được SW cache để chạy offline)
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+        );
+
+        // Tạo ObjectDetector với model EfficientDet-Lite0 (float16, GPU→CPU fallback)
+        try {
+          detector = await ObjectDetector.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath:
+                "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite",
+              delegate: "GPU"
+            },
+            runningMode: "VIDEO",
+            scoreThreshold: 0.5,
+            maxResults: 5
+          });
+        } catch (gpuErr) {
+          console.warn("GPU delegate lỗi, thử CPU:", gpuErr);
+          detector = await ObjectDetector.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath:
+                "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite",
+              delegate: "CPU"
+            },
+            runningMode: "VIDEO",
+            scoreThreshold: 0.5,
+            maxResults: 5
+          });
+        }
+
+        setAiStatus("ready", "AI sẵn sàng");
+      } catch (err) {
+        console.error("Không khởi tạo được MediaPipe:", err);
+        setAiStatus("error", "AI lỗi — vẫn chụp được");
+        detector = null;
+      }
+    }
+
+    function setAiStatus(state, text) {
+      aiText.textContent = text;
+      aiDot.className = "w-2.5 h-2.5 rounded-full " + ({
+        loading: "bg-yellow-400 animate-pulse",
+        ready:   "bg-green-400",
+        error:   "bg-red-500"
+      }[state] || "bg-gray-400");
+    }
+
+    // =========================================================
+    // VÒNG LẶP RENDER — detect + vẽ overlay mỗi frame
+    // =========================================================
+    function renderLoop() {
+      requestAnimationFrame(renderLoop);
+      if (!video.videoWidth) return;
+
+      // Xoá canvas & luôn vẽ lưới 1/3
+      octx.clearRect(0, 0, overlay.width, overlay.height);
+      drawRuleOfThirds();
+
+      // Chỉ chạy detect khi có frame video mới (tiết kiệm CPU/GPU)
+      if (detector && video.currentTime !== lastVideoTime) {
+        lastVideoTime = video.currentTime;
+        let result = null;
+        try {
+          result = detector.detectForVideo(video, performance.now());
+        } catch (err) {
+          // Bỏ qua lỗi lẻ tẻ của 1 frame
+        }
+        if (result && result.detections && result.detections.length) {
+          handleComposition(result.detections);
+        } else {
+          updateGuide("Hướng máy vào chủ thể…", "neutral");
+        }
+      }
+    }
+
+    // =========================================================
+    // BƯỚC 3 — THUẬT TOÁN BỐ CỤC 1/3 (thuần toán học)
+    // =========================================================
+
+    // Vẽ 2 đường dọc + 2 đường ngang chia khung thành 9 phần
+    function drawRuleOfThirds() {
+      const W = overlay.width, H = overlay.height;
+      octx.save();
+      octx.strokeStyle = "rgba(255,255,255,0.35)";
+      octx.lineWidth = 1;
+      for (let i = 1; i <= 2; i++) {
+        const x = (W / 3) * i, y = (H / 3) * i;
+        octx.beginPath(); octx.moveTo(x, 0); octx.lineTo(x, H); octx.stroke();
+        octx.beginPath(); octx.moveTo(0, y); octx.lineTo(W, y); octx.stroke();
+      }
+      octx.restore();
+    }
+
+    // Quy đổi toạ độ từ hệ pixel video → hệ pixel canvas hiển thị,
+    // có xử lý object-fit: cover (scale theo cạnh lớn hơn + offset crop).
+    function videoToCanvas(bbox) {
+      const vw = video.videoWidth, vh = video.videoHeight;
+      const cw = overlay.width,    ch = overlay.height;
+
+      // cover: scale = max để phủ kín, phần dư bị cắt đối xứng
+      const scale = Math.max(cw / vw, ch / vh);
+      const dispW = vw * scale, dispH = vh * scale;
+      const offX = (cw - dispW) / 2, offY = (ch - dispH) / 2;
+
+      let x = bbox.originX * scale + offX;
+      let y = bbox.originY * scale + offY;
+      let w = bbox.width  * scale;
+      let h = bbox.height * scale;
+
+      // Camera trước thường bị lật gương → lật toạ độ X cho khớp hiển thị
+      if (currentFacing === "user") {
+        x = cw - (x + w);
+      }
+      return { x, y, w, h };
+    }
+
+    // Xử lý danh sách detection: chọn chủ thể chính rồi so với giao điểm 1/3
+    function handleComposition(detections) {
+      // Ưu tiên person/animal; nếu không có thì chọn bbox diện tích lớn nhất.
+      const PRIORITY = new Set(["person","cat","dog","bird","horse","sheep","cow","bear","elephant"]);
+      let best = null, bestScore = -1;
+      for (const d of detections) {
+        const box = d.boundingBox;
+        if (!box) continue;
+        const label = (d.categories && d.categories[0] && d.categories[0].categoryName) || "";
+        const area  = box.width * box.height;
+        // Điểm ưu tiên: vật thể ưu tiên được nhân hệ số để "thắng" vật to hơn
+        const score = area * (PRIORITY.has(label) ? 3 : 1);
+        if (score > bestScore) { bestScore = score; best = d; }
+      }
+      if (!best) { updateGuide("Hướng máy vào chủ thể…", "neutral"); return; }
+
+      const rect = videoToCanvas(best.boundingBox);
+      const cx = rect.x + rect.w / 2;
+      const cy = rect.y + rect.h / 2;
+
+      const W = overlay.width, H = overlay.height;
+      // 4 giao điểm của lưới 1/3
+      const gx = [W / 3, (2 * W) / 3];
+      const gy = [H / 3, (2 * H) / 3];
+
+      // Tìm giao điểm gần tâm chủ thể nhất
+      let target = null, minDist = Infinity;
+      for (const px of gx) for (const py of gy) {
+        const dist = Math.hypot(cx - px, cy - py);
+        if (dist < minDist) { minDist = dist; target = { px, py }; }
+      }
+
+      // dx>0: chủ thể đang ở BÊN TRÁI giao điểm (cần dịch chủ thể sang phải trong khung)
+      // dy>0: chủ thể đang ở PHÍA TRÊN giao điểm (cần dịch chủ thể xuống trong khung)
+      const dx = target.px - cx;
+      const dy = target.py - cy;
+      const snapX = W * 0.08;    // ngưỡng snap ~8% chiều rộng
+      const snapY = H * 0.08;
+
+      const okX = Math.abs(dx) <= snapX;
+      const okY = Math.abs(dy) <= snapY;
+      const good = okX && okY;
+
+      // Vẽ bounding box (xanh khi đạt, vàng khi chưa) + tâm chủ thể
+      drawBox(rect, good);
+      drawTargetPoints(gx, gy, target);
+
+      // Sinh thông báo hướng dẫn theo vector lệch (ưu tiên trục lệch nhiều hơn)
+      if (good) {
+        updateGuide("✔ Bố cục đẹp — Chụp ngay!", "good");
+        drawBorder(true);
+      } else {
+        let msg;
+        // Vật lý: pan máy sang TRÁI thì cảnh (chủ thể) trôi sang PHẢI trong khung.
+        // → Chủ thể lệch trái giao điểm (dx>0, cần dịch phải) ⇒ đưa máy sang TRÁI.
+        //   Chủ thể lệch trên giao điểm (dy>0, cần dịch xuống) ⇒ ngẩng/đưa máy LÊN.
+        if (Math.abs(dx) / snapX >= Math.abs(dy) / snapY) {
+          msg = dx > 0 ? "Đưa máy sang trái ⬅️" : "Đưa máy sang phải ➡️";
+        } else {
+          msg = dy > 0 ? "Đưa máy lên trên ⬆️" : "Đưa máy xuống dưới ⬇️";
+        }
+        updateGuide(msg, "adjust");
+        drawBorder(false);
+      }
+    }
+
+    function drawBox(rect, good) {
+      octx.save();
+      octx.strokeStyle = good ? "#22c55e" : "#facc15";
+      octx.lineWidth = 3;
+      octx.strokeRect(rect.x, rect.y, rect.w, rect.h);
+      // Tâm chủ thể
+      octx.fillStyle = good ? "#22c55e" : "#facc15";
+      octx.beginPath();
+      octx.arc(rect.x + rect.w / 2, rect.y + rect.h / 2, 5, 0, Math.PI * 2);
+      octx.fill();
+      octx.restore();
+    }
+
+    // Đánh dấu 4 giao điểm 1/3, tô đậm giao điểm mục tiêu
+    function drawTargetPoints(gx, gy, target) {
+      octx.save();
+      for (const px of gx) for (const py of gy) {
+        const isTarget = target && px === target.px && py === target.py;
+        octx.beginPath();
+        octx.arc(px, py, isTarget ? 8 : 4, 0, Math.PI * 2);
+        octx.fillStyle = isTarget ? "rgba(255,255,255,0.95)" : "rgba(255,255,255,0.5)";
+        octx.fill();
+      }
+      octx.restore();
+    }
+
+    // Viền báo hiệu quanh khung: xanh khi bố cục đẹp
+    function drawBorder(good) {
+      if (!good) return;
+      octx.save();
+      octx.strokeStyle = "#22c55e";
+      octx.lineWidth = 6;
+      octx.strokeRect(3, 3, overlay.width - 6, overlay.height - 6);
+      octx.restore();
+    }
+
+    // Debounce: chỉ đổi text + màu khi trạng thái thực sự đổi → tránh nhấp nháy
+    function updateGuide(msg, tone) {
+      if (msg === lastGuideMsg) return;
+      lastGuideMsg = msg;
+      guide.textContent = msg;
+      const base = "px-4 py-2 rounded-2xl backdrop-blur text-base font-semibold text-center shadow-lg transition-all duration-200 ";
+      const toneClass = {
+        good:    "bg-green-600/80 text-white",
+        adjust:  "bg-black/55 text-yellow-300",
+        neutral: "bg-black/55 text-white"
+      }[tone] || "bg-black/55 text-white";
+      guide.className = base + toneClass;
+    }
+
+    // =========================================================
+    // KÍCH THƯỚC CANVAS OVERLAY — khớp video + màn hình
+    // =========================================================
+    function resizeOverlay() {
+      // Canvas dùng độ phân giải theo CSS pixel của phần tử để toạ độ khớp hiển thị
+      const rect = overlay.getBoundingClientRect();
+      overlay.width  = Math.round(rect.width);
+      overlay.height = Math.round(rect.height);
+    }
+    window.addEventListener("resize", resizeOverlay);
+    window.addEventListener("orientationchange", () => setTimeout(resizeOverlay, 300));
+
+    // =========================================================
+    // TRẠNG THÁI MẠNG (badge offline/online)
+    // =========================================================
+    function updateNet() {
+      const online = navigator.onLine;
+      netText.textContent = online ? "🌐 Online" : "✈️ Offline";
+    }
+    window.addEventListener("online", updateNet);
+    window.addEventListener("offline", updateNet);
+
+    // =========================================================
+    // GẮN SỰ KIỆN NÚT
+    // =========================================================
+    shutter.addEventListener("click", capture);
+    flipBtn.addEventListener("click", async () => {
+      const next = currentFacing === "environment" ? "user" : "environment";
+      await startCamera(next);
+    });
+
+    // =========================================================
+    // ĐĂNG KÝ SERVICE WORKER (đường dẫn tương đối cho GitHub Pages)
+    // =========================================================
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("./sw.js")
+          .then(reg => console.log("SW đăng ký OK:", reg.scope))
+          .catch(err => console.warn("SW đăng ký lỗi:", err));
+      });
+    }
+
+    // =========================================================
+    // KHỞI ĐỘNG APP
+    // =========================================================
+    (async function main() {
+      updateNet();
+      resizeOverlay();
+      renderLoop();                 // bắt đầu vòng vẽ (lưới hiển thị ngay)
+      await startCamera("environment");
+      resizeOverlay();
+      initDetector();               // tải AI song song (không chặn camera)
+    })();
+  </script>
+</body>
+</html>

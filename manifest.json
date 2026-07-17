@@ -1,0 +1,22 @@
+{
+  "name": "Camera AI Bố cục",
+  "short_name": "CameraAI",
+  "description": "Camera PWA chụp ảnh độ phân giải cao + AI hướng dẫn bố cục 1/3 (MediaPipe), chạy 100% offline.",
+  "lang": "vi",
+  "dir": "ltr",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#000000",
+  "background_color": "#000000",
+  "categories": ["photo", "utilities"],
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
