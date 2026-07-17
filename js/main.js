@@ -4,7 +4,10 @@
 import { store } from "./state.js";
 import { getMode } from "./modes.js";
 import { startCamera, applyAspectMask } from "./camera.js";
-import { drawRuleOfThirds, handleComposition, drawFaces } from "./composition.js";
+import {
+  drawRuleOfThirds, handleComposition, drawCompositionOverlay,
+  updateFaces, drawFaceOverlay,
+} from "./composition.js";
 import { detectObjects, detectFaces, sampleBrightness, sampleHistogram } from "./ai.js";
 import {
   collectDom, setAiStatus, buildModeBar, setMode, buildLensBar,
@@ -46,32 +49,29 @@ function renderLoop() {
   const mode = getMode(store.mode);
   const ctx = { octx, overlay, video, updateGuide };
 
-  // Chỉ detect khi có frame mới
-  if (video.currentTime !== store.lastVideoTime) {
+  // Detect có throttle ~12Hz (giải phóng main thread) + chỉ khi có frame mới
+  const now = performance.now();
+  const newFrame = video.currentTime !== store.lastVideoTime;
+  if (newFrame && now - store.lastDetectMs >= 80) {
     store.lastVideoTime = video.currentTime;
-    const ts = performance.now();
+    store.lastDetectMs = now;
 
     if (mode.ai === "object" && store.objectDetector) {
-      const res = detectObjects(video, ts);
-      if (res && res.detections && res.detections.length) {
-        const good = handleComposition(res.detections, ctx);
-        handleAutoShoot(good);
-      } else {
-        updateGuide("Hướng máy vào chủ thể…", "neutral");
-        store.goodStreak = 0;
-      }
+      const res = detectObjects(video, now);
+      const good = handleComposition(res && res.detections ? res.detections : [], ctx, now);
+      handleAutoShoot(good);
     } else if (mode.ai === "face" && store.faceDetector) {
-      const res = detectFaces(video, ts);
-      if (res && res.detections && res.detections.length) {
-        drawFaces(octx, res.detections, video, overlay);
-        updateGuide("Đã nhận diện khuôn mặt 😊", "good");
-      } else {
-        updateGuide("Hướng vào khuôn mặt…", "neutral");
-      }
+      const res = detectFaces(video, now);
+      const has = updateFaces(res && res.detections ? res.detections : [], now, video);
+      updateGuide(has ? "Đã nhận diện khuôn mặt 😊" : "Hướng vào khuôn mặt…", has ? "good" : "neutral");
     } else if (mode.id === "food" || mode.id === "pro" || mode.id === "video") {
       updateGuide(modeHint(mode.id), "neutral");
     }
   }
+
+  // Overlay vẽ MỖI frame từ state cache (box lướt mượt, không giật)
+  if (mode.ai === "object") drawCompositionOverlay(octx, overlay, video);
+  else if (mode.ai === "face") drawFaceOverlay(octx, overlay, video);
 
   // Histogram realtime (Pro) mỗi ~200ms
   if (store.mode === "pro" && performance.now() - histTimer > 200) {
@@ -133,9 +133,12 @@ function sceneSuggest() {
   const b = sampleBrightness(store.el.video);
   if (b == null) return;
   const now = performance.now();
+  // Đếm mẫu tối liên tiếp — cần 3 mẫu <50 mới gợi ý (chống nháy)
+  store.darkStreak = b < 50 ? store.darkStreak + 1 : 0;
   if (now - lastSuggest < 12000) return; // không spam
-  if (b < 50 && store.mode !== "night") {
+  if (store.darkStreak >= 3 && store.mode !== "night") {
     lastSuggest = now;
+    store.darkStreak = 0;
     showSceneToast("Ánh sáng yếu — chuyển chế độ Đêm?", "night", onModeChange);
   } else if (store.faceDetector && store.mode !== "portrait") {
     const res = detectFaces(store.el.video, now);
