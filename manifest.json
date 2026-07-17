@@ -1,7 +1,7 @@
 {
-  "name": "Camera AI Bố cục",
-  "short_name": "CameraAI",
-  "description": "Camera PWA chụp ảnh độ phân giải cao + AI hướng dẫn bố cục 1/3 (MediaPipe), chạy 100% offline.",
+  "name": "Camera AI",
+  "short_name": "Camera AI",
+  "description": "Camera PWA chuyên nghiệp: đa chế độ (Chân dung, Đêm, Phong cảnh, Pro, Video), AI bố cục + xử lý ảnh, khai thác tối đa phần cứng. Chạy 100% offline.",
   "lang": "vi",
   "dir": "ltr",
   "start_url": "./index.html",
@@ -17,6 +17,20 @@
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Chụp ngay",
+      "short_name": "Chụp",
+      "description": "Mở camera chụp ngay",
+      "url": "./index.html"
+    },
+    {
+      "name": "Thư viện",
+      "short_name": "Thư viện",
+      "description": "Mở thư viện ảnh",
+      "url": "./index.html?open=gallery"
     }
   ]
 }

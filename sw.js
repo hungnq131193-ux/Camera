@@ -4,9 +4,9 @@
  * Cache cả app shell + Tailwind CDN + MediaPipe (JS/WASM) + model.
  * ========================================================= */
 
-const CACHE = "camera-ai-v1";
+const CACHE = "camera-ai-v2";
 
-// Phiên bản MediaPipe (phải khớp với index.html để cache đúng file)
+// Phiên bản MediaPipe (phải khớp với js/state.js để cache đúng file)
 const MP = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 
 // Danh sách precache: cố gắng tải sẵn ngay khi install (lúc còn mạng).
@@ -18,6 +18,21 @@ const PRECACHE_URLS = [
   "./index.html",
   "./manifest.json",
   "./icon.svg",
+
+  // ----- CSS -----
+  "./css/app.css",
+
+  // ----- ES Modules -----
+  "./js/main.js",
+  "./js/state.js",
+  "./js/camera.js",
+  "./js/composition.js",
+  "./js/ai.js",
+  "./js/enhance.js",
+  "./js/modes.js",
+  "./js/capture.js",
+  "./js/gallery.js",
+  "./js/ui.js",
 
   // ----- Tailwind CDN -----
   "https://cdn.tailwindcss.com",
@@ -33,7 +48,13 @@ const PRECACHE_URLS = [
   MP + "/wasm/vision_wasm_nosimd_internal.wasm",
 
   // ----- Model Object Detection (EfficientDet-Lite0 float16) -----
-  "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite"
+  "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite",
+
+  // ----- Model Face Detection (BlazeFace short-range float16) -----
+  "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite",
+
+  // ----- Model Image Segmenter (SelfieSegmenter float16) -----
+  "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite"
 ];
 
 // -------- INSTALL: precache từng URL, bọc try/catch để 1 file lỗi không phá cả install --------
