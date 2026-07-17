@@ -4,10 +4,10 @@
  * Cache cả app shell + Tailwind CDN + MediaPipe (JS/WASM) + model.
  * ========================================================= */
 
-const CACHE = "camera-ai-v3";
+const CACHE = "camera-ai-v4";
 
 // Phiên bản MediaPipe (phải khớp với js/state.js để cache đúng file)
-const MP = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+const MP = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22";
 
 // Danh sách precache: cố gắng tải sẵn ngay khi install (lúc còn mạng).
 // Một số file phụ của WASM do MediaPipe tự request runtime sẽ được
@@ -51,8 +51,8 @@ const PRECACHE_URLS = [
   MP + "/wasm/vision_wasm_nosimd_internal.js",
   MP + "/wasm/vision_wasm_nosimd_internal.wasm",
 
-  // ----- Model Object Detection (EfficientDet-Lite0 float16) -----
-  "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite",
+  // ----- Model Object Detection (EfficientDet-Lite2 float16) -----
+  "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite2/float16/1/efficientdet_lite2.tflite",
 
   // ----- Model Face Detection (BlazeFace short-range float16) -----
   "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite",
