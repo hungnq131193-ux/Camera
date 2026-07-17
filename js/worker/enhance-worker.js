@@ -10,6 +10,7 @@
  * đã vô hình. Chỉ xem lại nếu job worker > 4s trên Android yếu.
  * ========================================================= */
 import * as core from "../enhance-core.js";
+import * as night from "./night.js";
 
 self.onmessage = async (e) => {
   const msg = e.data;
@@ -99,7 +100,7 @@ async function processPhoto(msg) {
 // NIGHT — burst stacking (Phase A: cộng trung bình; Phase C: align+merge)
 // =========================================================
 async function processNight(msg) {
-  const { bitmaps, jpegQuality, autoEnhance } = msg;
+  const { bitmaps, jpegQuality } = msg;
   const first = bitmaps[0];
   const w = first.width, h = first.height;
 
@@ -111,18 +112,18 @@ async function processNight(msg) {
     return cx.getImageData(0, 0, w, h);
   });
 
-  // Phase A: cộng trung bình ngây thơ. Phase C thay bằng align+merge (night.js).
-  const merged = core.stackFramesData(imageDatas);
+  // Night v2: align + merge chống ghost (night.js đã lo tone/level/denoise).
+  // Alignment throw → fallback cộng trung bình ngây thơ.
+  let merged;
+  try {
+    merged = night.alignAndMerge(imageDatas);
+  } catch (err) {
+    merged = core.stackFramesData(imageDatas);
+  }
 
   const canvas = new OffscreenCanvas(w, h);
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   ctx.putImageData(merged, 0, 0);
-
-  if (autoEnhance) {
-    const img = ctx.getImageData(0, 0, w, h);
-    core.autoEnhanceData(img, w, h);
-    ctx.putImageData(img, 0, 0);
-  }
 
   const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: jpegQuality });
   const thumbBlob = await makeThumbBlob(canvas, w, h);
@@ -145,8 +146,12 @@ async function processHdr(msg) {
     return cx.getImageData(0, 0, w, h);
   });
 
-  // Phase C sẽ thay bằng exposure fusion (night.js).
-  const fused = core.stackFramesData(imageDatas);
+  let fused;
+  try {
+    fused = night.exposureFusion(imageDatas);
+  } catch (err) {
+    fused = core.stackFramesData(imageDatas);
+  }
 
   const canvas = new OffscreenCanvas(w, h);
   const ctx = canvas.getContext("2d");
