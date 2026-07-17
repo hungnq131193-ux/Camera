@@ -24,7 +24,7 @@ export function collectDom() {
     "blurWrap","blurSlider","blurVal",
     "galleryThumb","shutter","shutterProg","flip","recTimer","recTime",
     "sheetBackdrop","settingsSheet","closeSheet",
-    "setQuality","qualitySub","setSound","setEnhance","setSuggest","setAuto","setMirror","setGrid","setDownload",
+    "setQuality","qualitySub","setSound","setEnhance","setSuggest","setAuto","setMirror","setGrid","setDownload","setHdr","hdrRow",
     "gallery","galleryBack","galleryGrid","viewer","viewerClose","viewerMedia","viewerInfo",
     "viewerShare","viewerDownload","viewerDelete",
     "sceneToast","sceneToastText","sceneAccept","sceneDismiss",
@@ -191,11 +191,11 @@ export function buildProPanel() {
   panel.innerHTML = "";
   const caps = store.caps, track = store.videoTrack;
   const controls = [
-    { key: "iso", label: "ISO", constraint: "iso" },
-    { key: "exposureTime", label: "SHUT", constraint: "exposureTime" },
-    { key: "colorTemperature", label: "WB", constraint: "colorTemperature" },
-    { key: "focusDistance", label: "FOC", constraint: "focusDistance" },
-    { key: "exposureCompensation", label: "EV", constraint: "exposureCompensation" },
+    { key: "iso", label: "ISO", autoMode: { exposureMode: "continuous" } },
+    { key: "exposureTime", label: "SHUT", log: true, autoMode: { exposureMode: "continuous" } },
+    { key: "colorTemperature", label: "WB", autoMode: { whiteBalanceMode: "continuous" } },
+    { key: "focusDistance", label: "FOC", autoMode: { focusMode: "continuous" } },
+    { key: "exposureCompensation", label: "EV", autoMode: null },
   ];
   let any = false;
   for (const c of controls) {
@@ -206,14 +206,25 @@ export function buildProPanel() {
     wrap.className = "pro-ctrl";
     const s = store.trackSettings || {};
     const cur = (s[c.key] != null) ? s[c.key] : (cap.min + cap.max) / 2;
+    const fmtC = (v) => (c.key === "exposureTime") ? fmtShutter(v) : fmt(v);
+
+    // Slider: exposureTime map logarit (value = min·(max/min)^t)
+    const toSlider = (v) => c.log ? logToT(v, cap.min, cap.max) : v;
+    const fromSlider = (t) => c.log ? tToLog(t, cap.min, cap.max) : t;
+    const sMin = c.log ? 0 : cap.min, sMax = c.log ? 1 : cap.max;
+    const sStep = c.log ? 0.01 : (cap.step || (cap.max - cap.min) / 100);
+
     wrap.innerHTML = `<label>${c.label}</label>
-      <input type="range" min="${cap.min}" max="${cap.max}" step="${cap.step || (cap.max-cap.min)/100}" value="${cur}">
-      <span class="val">${fmt(cur)}</span>`;
+      <input type="range" min="${sMin}" max="${sMax}" step="${sStep}" value="${toSlider(cur)}">
+      <span class="val">${fmtC(cur)}</span>
+      <button class="pro-auto" type="button" title="Tự động">A</button>`;
     const input = wrap.querySelector("input");
     const valEl = wrap.querySelector(".val");
+    const autoBtn = wrap.querySelector(".pro-auto");
+
     input.addEventListener("input", async () => {
-      const v = Number(input.value);
-      valEl.textContent = fmt(v);
+      const v = fromSlider(Number(input.value));
+      valEl.textContent = fmtC(v);
       const adv = {};
       if (c.key === "iso" || c.key === "exposureTime") adv.exposureMode = "manual";
       if (c.key === "colorTemperature") adv.whiteBalanceMode = "manual";
@@ -221,13 +232,59 @@ export function buildProPanel() {
       adv[c.key] = v;
       try { await track.applyConstraints({ advanced: [adv] }); } catch {}
     });
+
+    // Chip AUTO: trả control về continuous + slider về giữa/hiện tại
+    autoBtn.addEventListener("click", async () => {
+      try {
+        if (c.autoMode) await track.applyConstraints({ advanced: [c.autoMode] });
+        else await track.applyConstraints({ advanced: [{ exposureCompensation: 0 }] });
+      } catch {}
+      // đọc lại giá trị auto nếu có
+      let auto = c.key === "exposureCompensation" ? 0 : (cap.min + cap.max) / 2;
+      try { const ns = track.getSettings ? track.getSettings() : {}; if (ns[c.key] != null) auto = ns[c.key]; } catch {}
+      input.value = toSlider(auto);
+      valEl.textContent = fmtC(auto);
+    });
+
     panel.appendChild(wrap);
   }
+
+  // Chip bật torch trong pro panel (nếu máy hỗ trợ)
+  if (caps.torch) {
+    const t = document.createElement("button");
+    t.className = "pro-torch" + (store.torchOn ? " on" : "");
+    t.type = "button";
+    t.textContent = "🔦";
+    t.title = "Đèn";
+    t.addEventListener("click", async () => {
+      const ok = await setTorch(!store.torchOn);
+      if (ok) t.classList.toggle("on", store.torchOn);
+    });
+    panel.appendChild(t);
+    any = true;
+  }
+
   if (!any) {
     panel.innerHTML = `<div style="font-size:10px; color:#888; text-align:center; padding:8px;">Máy không hỗ trợ<br>chỉnh tay qua web</div>`;
   }
 }
 function fmt(v) { return Math.abs(v) >= 100 ? Math.round(v) : v.toFixed(1); }
+// SHUT: hiển thị dạng 1/x s (exposureTime đơn vị 100µs trên nhiều máy Chrome)
+function fmtShutter(v) {
+  const sec = v / 10000; // 100µs → giây
+  if (sec <= 0) return "—";
+  if (sec >= 1) return sec.toFixed(1) + "s";
+  return "1/" + Math.round(1 / sec) + "s";
+}
+// map logarit giữa giá trị thực & slider t∈[0,1]
+function logToT(v, min, max) {
+  min = Math.max(1e-6, min); v = Math.max(min, Math.min(max, v));
+  return Math.log(v / min) / Math.log(max / min);
+}
+function tToLog(t, min, max) {
+  min = Math.max(1e-6, min);
+  return min * Math.pow(max / min, Math.min(1, Math.max(0, t)));
+}
 
 // =========================================================
 // TOP BAR (flash, timer, grid, settings, aspect) + tap focus
@@ -329,6 +386,7 @@ export function bindSettings() {
   el.setMirror.checked = s.mirrorSelfie;
   el.setGrid.checked = s.grid;
   if (el.setDownload) el.setDownload.checked = s.autoDownload;
+  if (el.setHdr) el.setHdr.checked = s.hdrMode;
   el.blurSlider.value = s.portraitBlur; el.blurVal.textContent = s.portraitBlur;
   store.gridOn = s.grid;
   store.el.gridBtn.classList.toggle("on", s.grid);
@@ -348,6 +406,18 @@ export function bindSettings() {
   });
   bind(el.setGrid, "grid", () => { store.gridOn = s.grid; store.el.gridBtn.classList.toggle("on", s.grid); });
   if (el.setDownload) bind(el.setDownload, "autoDownload");
+  if (el.setHdr) bind(el.setHdr, "hdrMode");
+  refreshHdrAvailability();
+}
+
+// HDR chỉ khả dụng khi máy hỗ trợ exposureCompensation
+export function refreshHdrAvailability() {
+  const el = store.el;
+  if (!el.hdrRow || !el.setHdr) return;
+  const ok = hasRange(store.caps && store.caps.exposureCompensation);
+  el.hdrRow.style.opacity = ok ? "" : "0.45";
+  el.setHdr.disabled = !ok;
+  if (!ok) el.hdrRow.title = "Máy không hỗ trợ chỉnh phơi sáng (EV)";
 }
 
 // =========================================================

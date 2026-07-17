@@ -15,6 +15,7 @@ const DEFAULT_SETTINGS = {
   grid: true,
   portraitBlur: 14,   // mức xoá phông (0–25)
   autoDownload: true, // tự tải JPEG về thư mục Tải xuống
+  hdrMode: false,     // HDR bracketing (mode Ảnh, cần EV)
 };
 
 function loadSettings() {

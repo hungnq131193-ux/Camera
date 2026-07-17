@@ -6,7 +6,7 @@
  * ========================================================= */
 import { store } from "./state.js";
 import { getMode } from "./modes.js";
-import { flashPulse } from "./camera.js";
+import { flashPulse, applyEV, hasRange } from "./camera.js";
 import { initSegmenter } from "./ai.js";
 import { saveMedia, updateMedia } from "./gallery.js";
 import * as pipeline from "./pipeline.js";
@@ -66,6 +66,20 @@ async function grabFullFrame() {
   const h = s.height || video.videoHeight || 1080;
   const { c } = canvasFrom(video, w, h);
   return await createImageBitmap(c);
+}
+
+// Đợi frame video mới (rVFC khi có → 8 frame khác nhau; fallback timeout)
+function nextVideoFrame(gap = 60) {
+  const video = store.el.video;
+  return new Promise(res => {
+    if (video.requestVideoFrameCallback) {
+      let done = false;
+      const to = setTimeout(() => { if (!done) { done = true; res(); } }, 250);
+      video.requestVideoFrameCallback(() => { if (!done) { done = true; clearTimeout(to); res(); } });
+    } else {
+      setTimeout(res, gap);
+    }
+  });
 }
 
 // Vẽ 1 frame video → canvas hình học cuối (crop tỉ lệ + mirror selfie)
@@ -169,6 +183,13 @@ export async function capturePhoto() {
       return;
     }
 
+    // HDR bracketing (mode Ảnh, bật toggle, máy hỗ trợ EV)
+    if (mode.pipeline === "photo" && store.settings.hdrMode &&
+        store.caps && hasRange(store.caps.exposureCompensation)) {
+      await capturePhotoHdr(id, ts, mode, q);
+      return;
+    }
+
     // 2) Grab full frame → hình học cuối (limit → crop → mirror)
     const bitmap = await grabFullFrame();
     let { c } = limitSize(bitmap);
@@ -226,13 +247,24 @@ export async function capturePhoto() {
   }
 }
 
-// Đường chụp Đêm (burst → worker stacking)
+// Đường chụp Đêm (burst 8 frame → worker align+merge)
 async function capturePhotoNight(id, ts, mode, q) {
   showCenterHint("Giữ chắc tay 📷");
+
+  // Nâng phơi sáng (+ nửa max EV) trước burst nếu máy hỗ trợ, restore sau
+  const evCap = store.caps && store.caps.exposureCompensation;
+  const canBoost = hasRange(evCap);
+  const prevEv = store.ev;
+  if (canBoost) { try { await applyEV(Math.min(evCap.max, evCap.max / 2)); } catch {} }
+
   const canvases = [];
-  for (let i = 0; i < 6; i++) {
-    canvases.push(frameToFinalCanvas());
-    if (i < 5) await new Promise(r => setTimeout(r, 90));
+  try {
+    for (let i = 0; i < 8; i++) {
+      canvases.push(frameToFinalCanvas());
+      if (i < 7) await nextVideoFrame(60);
+    }
+  } finally {
+    if (canBoost) { try { await applyEV(prevEv || 0); } catch {} }
   }
   hideCenterHint();
 
@@ -244,7 +276,7 @@ async function capturePhotoNight(id, ts, mode, q) {
   store.busy = false;
 
   const bitmaps = await Promise.all(canvases.map(c => createImageBitmap(c)));
-  const job = { kind: "night", bitmaps, jpegQuality: q, autoEnhance: store.settings.autoEnhance };
+  const job = { kind: "night", bitmaps, jpegQuality: q };
   try {
     const res = await pipeline.enhanceInWorker(job);
     await savePromise;
@@ -253,6 +285,55 @@ async function capturePhotoNight(id, ts, mode, q) {
     maybeAutoDownload(res.blob, ts);
   } catch (err) {
     console.warn("Worker đêm lỗi:", err);
+    await savePromise;
+    await updateMedia(id, { pending: false });
+    store.el.toast && store.el.toast("Không xử lý được ảnh — đã lưu bản gốc");
+    maybeAutoDownload(quickBlob, ts);
+  } finally {
+    if (pipeline.pendingJobs() === 0) setThumbProcessing(false);
+  }
+}
+
+// Đường chụp HDR (3 frame EV −1/0/+1 → worker exposure fusion)
+async function capturePhotoHdr(id, ts, mode, q) {
+  showCenterHint("HDR — giữ chắc tay 📷");
+  const evCap = store.caps.exposureCompensation;
+  const prevEv = store.ev;
+  const under = Math.max(evCap.min, -1);
+  const mid = Math.min(evCap.max, Math.max(evCap.min, 0));
+  const over = Math.min(evCap.max, 1);
+  const targets = [under, mid, over]; // exposureFusion coi giữa (mid) là tham chiếu
+
+  const canvases = [];
+  try {
+    for (const ev of targets) {
+      try { await applyEV(ev); } catch {}
+      await nextVideoFrame(60);
+      await nextVideoFrame(60); // 2 frame settle
+      canvases.push(frameToFinalCanvas());
+    }
+  } finally {
+    try { await applyEV(prevEv || 0); } catch {}
+  }
+  hideCenterHint();
+
+  // Quick-save frame EV0 (index 1)
+  const quickBlob = await new Promise(r => canvases[1].toBlob(r, "image/jpeg", q));
+  const quickThumb = await makeQuickThumb(canvases[1]);
+  const savePromise = saveMedia({ id, ts, blob: quickBlob, thumbBlob: quickThumb, type: "photo", mode: mode.id, pending: true });
+  savePromise.then(item => { if (latestCaptureId === id) setGalleryThumb(item.thumbBlob || item.blob, false); });
+  store.busy = false;
+
+  const bitmaps = await Promise.all(canvases.map(c => createImageBitmap(c)));
+  const job = { kind: "hdr", bitmaps, jpegQuality: q };
+  try {
+    const res = await pipeline.enhanceInWorker(job);
+    await savePromise;
+    const updated = await updateMedia(id, { blob: res.blob, thumbBlob: res.thumbBlob, pending: false });
+    if (updated && latestCaptureId === id) setGalleryThumb(updated.thumbBlob || updated.blob, false);
+    maybeAutoDownload(res.blob, ts);
+  } catch (err) {
+    console.warn("Worker HDR lỗi:", err);
     await savePromise;
     await updateMedia(id, { pending: false });
     store.el.toast && store.el.toast("Không xử lý được ảnh — đã lưu bản gốc");

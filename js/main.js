@@ -12,7 +12,7 @@ import { detectObjects, detectFaces, sampleBrightness, sampleHistogram } from ".
 import {
   collectDom, setAiStatus, buildModeBar, setMode, buildLensBar,
   refreshZoom, bindTopBar, bindSettings, bindShutter, bindGallery,
-  bindHorizon, showSceneToast, toast,
+  bindHorizon, showSceneToast, toast, refreshHdrAvailability,
 } from "./ui.js";
 import { capturePhoto } from "./capture.js";
 import * as pipeline from "./pipeline.js";
@@ -191,6 +191,7 @@ async function main() {
   if (ok) {
     refreshZoom();
     buildLensBar();
+    refreshHdrAvailability();
     // set mode mặc định (khởi tạo object detector)
     setMode(store.mode, onModeChange);
   }
