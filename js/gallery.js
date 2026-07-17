@@ -57,10 +57,16 @@ function grabVideoFrame(blob) {
   });
 }
 
-export async function saveMedia({ blob, type = "photo", mode = "photo" }) {
+export async function saveMedia({ blob, type = "photo", mode = "photo", id, ts, thumbBlob, pending = false }) {
   const db = await openDB();
-  const thumbBlob = await makeThumb(blob, type);
-  const item = { id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random())), blob, thumbBlob, type, mode, ts: Date.now() };
+  // Chỉ decode lại blob để tạo thumb khi KHÔNG được cấp sẵn (đường video)
+  const finalThumb = thumbBlob || await makeThumb(blob, type);
+  const item = {
+    id: id || (crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random())),
+    blob, thumbBlob: finalThumb, type, mode,
+    ts: ts || Date.now(),
+    pending: !!pending,
+  };
   await new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, "readwrite");
     tx.objectStore(STORE).put(item);
@@ -69,6 +75,21 @@ export async function saveMedia({ blob, type = "photo", mode = "photo" }) {
   });
   checkStorage();
   return item;
+}
+
+// Cập nhật đè 1 record (worker trả blob/thumb cuối) trong 1 transaction
+export async function updateMedia(id, patch) {
+  const db = await openDB();
+  const item = await getOne(id);
+  if (!item) return null;
+  const updated = { ...item, ...patch };
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).put(updated);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+  return updated;
 }
 
 export async function getAll() {

@@ -1,13 +1,16 @@
 /* =========================================================
  * capture.js — Pipeline chụp ảnh
- * takePhoto/canvas → bitmap → crop tỉ lệ → pipeline mode →
- * auto-enhance → mirror selfie → JPEG → lưu gallery.
+ * Đường nhanh (worker): quick-save bản JPEG đúng hình học NGAY, mở khoá
+ * nút chụp, rồi worker enhance nền → updateMedia đè cùng record. Auto-download
+ * bản cuối. Đường fallback: capturePhotoSync (đồng bộ như bản cũ).
  * ========================================================= */
 import { store } from "./state.js";
 import { getMode } from "./modes.js";
 import { flashPulse } from "./camera.js";
 import { initSegmenter } from "./ai.js";
-import { saveMedia } from "./gallery.js";
+import { saveMedia, updateMedia } from "./gallery.js";
+import * as pipeline from "./pipeline.js";
+import { maybeAutoDownload } from "./download.js";
 import {
   limitSize, cropAspect, mirror, autoEnhance,
   applyModeFilter, portraitBokeh, stackFrames, canvasFrom,
@@ -65,7 +68,204 @@ async function grabFullFrame() {
   return await createImageBitmap(c);
 }
 
-// Lấy nhanh nhiều frame từ video (mode Đêm stacking)
+// Vẽ 1 frame video → canvas hình học cuối (crop tỉ lệ + mirror selfie)
+function frameToFinalCanvas() {
+  const video = store.el.video;
+  const w = video.videoWidth, h = video.videoHeight;
+  let c = canvasFrom(video, w, h).c;
+  c = cropAspect(c, store.aspect);
+  if (store.currentFacing === "user" && store.settings.mirrorSelfie) c = mirror(c);
+  return c;
+}
+
+// Thumbnail 256px center-crop từ canvas (đường nhanh) → Blob
+function makeQuickThumb(c) {
+  const size = 256;
+  const w = c.width, h = c.height;
+  const scale = size / Math.min(w, h);
+  const { c: tc, ctx } = canvasFrom(null, size, size);
+  const dw = w * scale, dh = h * scale;
+  ctx.drawImage(c, (size - dw) / 2, (size - dh) / 2, dw, dh);
+  return new Promise(r => tc.toBlob(r, "image/jpeg", 0.8));
+}
+
+// Thumbnail đóng băng tức thì từ video (áp mirror selfie) → hiện < 50ms
+function quickPreviewFromVideo() {
+  try {
+    const video = store.el.video;
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw) return;
+    const size = 256;
+    const scale = size / Math.min(vw, vh);
+    const cw = Math.round(vw * scale), ch = Math.round(vh * scale);
+    const { c, ctx } = canvasFrom(null, cw, ch);
+    if (store.currentFacing === "user" && store.settings.mirrorSelfie) {
+      ctx.translate(cw, 0); ctx.scale(-1, 1);
+    }
+    ctx.drawImage(video, 0, 0, cw, ch);
+    setThumbProcessing(true);
+    c.toBlob(b => { if (b) setGalleryThumb(b, false); }, "image/jpeg", 0.7);
+  } catch {}
+}
+
+// Segmenter → mask chuyển thành transferable buffer cho worker
+async function computeMask(c) {
+  const seg = await initSegmenter();
+  if (!seg) return null;
+  try {
+    const res = seg.segment(c);
+    // Phase B: confidence mask mềm (0..1) ưu tiên; fallback category mask nhị phân
+    let buf, w, h, soft = false;
+    if (res.confidenceMasks && res.confidenceMasks[0]) {
+      const cm = res.confidenceMasks[0];
+      w = cm.width; h = cm.height;
+      const f = cm.getAsFloat32Array();
+      const u = new Uint8Array(f.length);
+      for (let i = 0; i < f.length; i++) u[i] = Math.min(255, Math.max(0, f[i] * 255));
+      buf = u.buffer;
+      soft = true;
+    } else if (res.categoryMask) {
+      const cm = res.categoryMask;
+      w = cm.width; h = cm.height;
+      buf = cm.getAsUint8Array().slice().buffer;
+    }
+    if (res.close) res.close();
+    if (!buf) return null;
+    return { buf, w, h, soft };
+  } catch (err) {
+    console.warn("Segment lỗi:", err);
+    return null;
+  }
+}
+
+// =========================================================
+// CHỤP ẢNH — điều phối worker vs fallback
+// =========================================================
+let latestCaptureId = null;
+
+export async function capturePhoto() {
+  if (!store.videoTrack || store.busy) return;
+  await pipeline.ready();
+  if (!pipeline.isWorkerAvailable()) return capturePhotoSync();
+
+  store.busy = true;
+  const mode = getMode(store.mode);
+  const id = crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random());
+  const ts = Date.now();
+  const q = store.settings.jpegQuality;
+  latestCaptureId = id;
+
+  try {
+    // 1) Phản hồi tức thì (trước mọi await)
+    shutterSound();
+    doFlash();
+    if (navigator.vibrate) navigator.vibrate(30);
+    quickPreviewFromVideo();
+
+    if (store.flashMode === "on" && mode.pipeline !== "night") flashPulse(280);
+
+    if (mode.pipeline === "night") {
+      await capturePhotoNight(id, ts, mode, q);
+      return;
+    }
+
+    // 2) Grab full frame → hình học cuối (limit → crop → mirror)
+    const bitmap = await grabFullFrame();
+    let { c } = limitSize(bitmap);
+    c = cropAspect(c, store.aspect);
+    if (store.currentFacing === "user" && store.settings.mirrorSelfie) c = mirror(c);
+
+    const needsWorker =
+      (store.settings.autoEnhance && mode.pipeline !== "pro") ||
+      ["portrait", "food", "landscape"].includes(mode.pipeline);
+
+    // 3) Quick-save bản đúng hình học (chưa enhance)
+    const quickBlob = await new Promise(r => c.toBlob(r, "image/jpeg", q));
+    const quickThumb = await makeQuickThumb(c);
+    const savePromise = saveMedia({ id, ts, blob: quickBlob, thumbBlob: quickThumb, type: "photo", mode: mode.id, pending: needsWorker });
+    savePromise.then(item => { if (latestCaptureId === id) setGalleryThumb(item.thumbBlob || item.blob, false); });
+    store.busy = false; // mở khoá nút chụp NGAY
+
+    if (!needsWorker) {
+      await savePromise;
+      if (pipeline.pendingJobs() === 0) setThumbProcessing(false);
+      maybeAutoDownload(quickBlob, ts);
+      return;
+    }
+
+    // 4) Portrait: segment trên main thread → mask transferable
+    let mask = null;
+    if (mode.pipeline === "portrait") mask = await computeMask(c);
+
+    // 5) Dispatch worker
+    const workBitmap = await createImageBitmap(c);
+    const job = {
+      kind: "photo", bitmap: workBitmap, mode: mode.pipeline,
+      autoEnhance: store.settings.autoEnhance, jpegQuality: q,
+      mask, portraitBlur: store.settings.portraitBlur,
+    };
+    try {
+      const res = await pipeline.enhanceInWorker(job);
+      await savePromise;
+      const updated = await updateMedia(id, { blob: res.blob, thumbBlob: res.thumbBlob, pending: false });
+      if (updated && latestCaptureId === id) setGalleryThumb(updated.thumbBlob || updated.blob, false);
+      maybeAutoDownload(res.blob, ts);
+    } catch (err) {
+      console.warn("Worker xử lý lỗi:", err);
+      await savePromise;
+      await updateMedia(id, { pending: false });
+      store.el.toast && store.el.toast("Không xử lý được ảnh — đã lưu bản gốc");
+      maybeAutoDownload(quickBlob, ts);
+    } finally {
+      if (pipeline.pendingJobs() === 0) setThumbProcessing(false);
+    }
+  } catch (err) {
+    console.error("Chụp lỗi:", err);
+    store.busy = false;
+    if (pipeline.pendingJobs() === 0) setThumbProcessing(false);
+  }
+}
+
+// Đường chụp Đêm (burst → worker stacking)
+async function capturePhotoNight(id, ts, mode, q) {
+  showCenterHint("Giữ chắc tay 📷");
+  const canvases = [];
+  for (let i = 0; i < 6; i++) {
+    canvases.push(frameToFinalCanvas());
+    if (i < 5) await new Promise(r => setTimeout(r, 90));
+  }
+  hideCenterHint();
+
+  // Quick-save frame #0 (đã crop/mirror)
+  const quickBlob = await new Promise(r => canvases[0].toBlob(r, "image/jpeg", q));
+  const quickThumb = await makeQuickThumb(canvases[0]);
+  const savePromise = saveMedia({ id, ts, blob: quickBlob, thumbBlob: quickThumb, type: "photo", mode: mode.id, pending: true });
+  savePromise.then(item => { if (latestCaptureId === id) setGalleryThumb(item.thumbBlob || item.blob, false); });
+  store.busy = false;
+
+  const bitmaps = await Promise.all(canvases.map(c => createImageBitmap(c)));
+  const job = { kind: "night", bitmaps, jpegQuality: q, autoEnhance: store.settings.autoEnhance };
+  try {
+    const res = await pipeline.enhanceInWorker(job);
+    await savePromise;
+    const updated = await updateMedia(id, { blob: res.blob, thumbBlob: res.thumbBlob, pending: false });
+    if (updated && latestCaptureId === id) setGalleryThumb(updated.thumbBlob || updated.blob, false);
+    maybeAutoDownload(res.blob, ts);
+  } catch (err) {
+    console.warn("Worker đêm lỗi:", err);
+    await savePromise;
+    await updateMedia(id, { pending: false });
+    store.el.toast && store.el.toast("Không xử lý được ảnh — đã lưu bản gốc");
+    maybeAutoDownload(quickBlob, ts);
+  } finally {
+    if (pipeline.pendingJobs() === 0) setThumbProcessing(false);
+  }
+}
+
+// =========================================================
+// FALLBACK ĐỒNG BỘ (không có OffscreenCanvas/module worker)
+// Giữ nguyên luồng bản cũ, thêm auto-download.
+// =========================================================
 async function grabVideoFrames(count = 6, gap = 90) {
   const video = store.el.video;
   const w = video.videoWidth, h = video.videoHeight;
@@ -77,31 +277,43 @@ async function grabVideoFrames(count = 6, gap = 90) {
   return frames;
 }
 
-// =========================================================
-// CHỤP ẢNH (mọi mode trừ video)
-// =========================================================
-export async function capturePhoto() {
-  if (!store.videoTrack || store.busy) return;
+async function applyPortraitSync(c) {
+  const seg = await initSegmenter();
+  if (!seg) return c;
+  try {
+    const res = seg.segment(c);
+    if (res.confidenceMasks && res.confidenceMasks[0]) {
+      const cm = res.confidenceMasks[0];
+      const f = cm.getAsFloat32Array();
+      const u = new Uint8Array(f.length);
+      for (let i = 0; i < f.length; i++) u[i] = Math.min(255, Math.max(0, f[i] * 255));
+      portraitBokeh(c, u, cm.width, cm.height, store.settings.portraitBlur, true);
+    } else if (res.categoryMask) {
+      const cm = res.categoryMask;
+      portraitBokeh(c, cm.getAsUint8Array(), cm.width, cm.height, store.settings.portraitBlur, false);
+    }
+    if (res.close) res.close();
+  } catch (err) {
+    console.warn("Portrait segment lỗi:", err);
+  }
+  return c;
+}
+
+async function capturePhotoSync() {
+  if (store.busy) return;
   store.busy = true;
   const mode = getMode(store.mode);
-
+  const ts = Date.now();
   try {
     shutterSound();
     doFlash();
     if (navigator.vibrate) navigator.vibrate(30);
-
-    // Flash phần cứng (torch) nếu flashMode=on và không phải mode Đêm
-    if (store.flashMode === "on" && mode.pipeline !== "night") {
-      flashPulse(280); // không await để không trễ chụp quá nhiều
-    }
-
-    // Hiện spinner tạm trên thumbnail
+    if (store.flashMode === "on" && mode.pipeline !== "night") flashPulse(280);
     setThumbProcessing(true);
 
     let canvas;
-
     if (mode.pipeline === "night") {
-      store.el.centerHint && showCenterHint("Giữ chắc tay 📷");
+      showCenterHint("Giữ chắc tay 📷");
       const frames = await grabVideoFrames(6, 90);
       hideCenterHint();
       const stacked = stackFrames(frames);
@@ -110,55 +322,26 @@ export async function capturePhoto() {
       const bitmap = await grabFullFrame();
       let { c } = limitSize(bitmap);
       c = cropAspect(c, store.aspect);
-
-      if (mode.pipeline === "portrait") {
-        c = await applyPortrait(c);
-      } else if (mode.pipeline === "food" || mode.pipeline === "landscape") {
-        applyModeFilter(c, mode.pipeline);
-      }
+      if (mode.pipeline === "portrait") c = await applyPortraitSync(c);
+      else if (mode.pipeline === "food" || mode.pipeline === "landscape") applyModeFilter(c, mode.pipeline);
       canvas = c;
     }
 
-    // Auto-enhance (trừ Pro; portrait/filter đã xử lý riêng nhưng vẫn enhance nhẹ trừ pro)
-    if (store.settings.autoEnhance && mode.pipeline !== "pro") {
-      autoEnhance(canvas);
-    }
-
-    // Mirror selfie
-    if (store.currentFacing === "user" && store.settings.mirrorSelfie) {
-      canvas = mirror(canvas);
-    }
+    if (store.settings.autoEnhance && mode.pipeline !== "pro") autoEnhance(canvas);
+    if (store.currentFacing === "user" && store.settings.mirrorSelfie) canvas = mirror(canvas);
 
     const blob = await new Promise(r => canvas.toBlob(r, "image/jpeg", store.settings.jpegQuality));
     if (blob) {
-      const item = await saveMedia({ blob, type: "photo", mode: mode.id });
-      updateThumb(item);
+      const item = await saveMedia({ ts, blob, type: "photo", mode: mode.id });
+      setGalleryThumb(item.thumbBlob || item.blob, false);
+      maybeAutoDownload(blob, ts);
     }
   } catch (err) {
-    console.error("Chụp lỗi:", err);
+    console.error("Chụp lỗi (sync):", err);
   } finally {
     setThumbProcessing(false);
     store.busy = false;
   }
-}
-
-// Xoá phông: segmenter → category mask → bokeh
-async function applyPortrait(c) {
-  const seg = await initSegmenter();
-  if (!seg) return c;
-  try {
-    const res = seg.segment(c);
-    const cm = res.categoryMask;
-    if (!cm) return c;
-    const maskW = cm.width, maskH = cm.height;
-    const maskArr = cm.getAsUint8Array();
-    // SelfieSegmenter: người thường là category != 0
-    portraitBokeh(c, maskArr, maskW, maskH, store.settings.portraitBlur);
-    if (res.close) res.close();
-  } catch (err) {
-    console.warn("Portrait segment lỗi:", err);
-  }
-  return c;
 }
 
 // =========================================================
@@ -184,7 +367,7 @@ export function startRecording() {
   rec.onstop = async () => {
     const blob = new Blob(chunks, { type: mime || "video/webm" });
     const item = await saveMedia({ blob, type: "video", mode: "video" });
-    updateThumb(item);
+    setGalleryThumb(item.thumbBlob || item.blob, true);
   };
   rec.start(1000);
   store.recorder = rec;
@@ -201,14 +384,16 @@ export function stopRecording() {
   }
 }
 
-// -------- Thumbnail helpers --------
-function updateThumb(item) {
+// -------- Thumbnail helpers (revoke URL cũ chống rò rỉ) --------
+let lastThumbUrl = null;
+export function setGalleryThumb(blob, isVideo) {
   const g = store.el.galleryThumb;
-  if (!g || !item) return;
-  const url = URL.createObjectURL(item.thumbBlob || item.blob);
-  g.querySelector("img").src = url;
+  if (!g || !blob) return;
+  if (lastThumbUrl) URL.revokeObjectURL(lastThumbUrl);
+  lastThumbUrl = URL.createObjectURL(blob);
+  g.querySelector("img").src = lastThumbUrl;
   g.classList.remove("hidden");
-  g.querySelector(".badge-vid").style.display = item.type === "video" ? "block" : "none";
+  g.querySelector(".badge-vid").style.display = isVideo ? "block" : "none";
 }
 function setThumbProcessing(on) {
   const g = store.el.galleryThumb;
