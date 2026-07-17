@@ -12,6 +12,7 @@ import {
   bindHorizon, showSceneToast, toast,
 } from "./ui.js";
 import { capturePhoto } from "./capture.js";
+import * as pipeline from "./pipeline.js";
 
 // -------- Overlay resize --------
 function resizeOverlay() {
@@ -176,6 +177,9 @@ async function main() {
 
   resizeOverlay();
   renderLoop();
+
+  // Khởi tạo worker xử lý ảnh (handshake) song song để lần chụp đầu tức thì
+  pipeline.ready();
 
   const ok = await startCamera({ facing: "environment" });
   resizeOverlay();

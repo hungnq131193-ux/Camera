@@ -4,7 +4,7 @@
  * Cache cả app shell + Tailwind CDN + MediaPipe (JS/WASM) + model.
  * ========================================================= */
 
-const CACHE = "camera-ai-v2";
+const CACHE = "camera-ai-v3";
 
 // Phiên bản MediaPipe (phải khớp với js/state.js để cache đúng file)
 const MP = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
@@ -29,6 +29,10 @@ const PRECACHE_URLS = [
   "./js/composition.js",
   "./js/ai.js",
   "./js/enhance.js",
+  "./js/enhance-core.js",
+  "./js/pipeline.js",
+  "./js/download.js",
+  "./js/worker/enhance-worker.js",
   "./js/modes.js",
   "./js/capture.js",
   "./js/gallery.js",

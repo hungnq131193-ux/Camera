@@ -9,7 +9,7 @@ import {
   startCamera, enumerateLenses, setTorch, applyEV, tapFocus,
   bindEVDrag, applyAspectMask, bindPinchZoom, setZoomUI, hasRange,
 } from "./camera.js";
-import { capturePhoto, startRecording, stopRecording } from "./capture.js";
+import { capturePhoto, startRecording, stopRecording, setGalleryThumb } from "./capture.js";
 import { initFaceDetector, initObjectDetector, initSegmenter } from "./ai.js";
 import * as gallery from "./gallery.js";
 
@@ -24,7 +24,7 @@ export function collectDom() {
     "blurWrap","blurSlider","blurVal",
     "galleryThumb","shutter","shutterProg","flip","recTimer","recTime",
     "sheetBackdrop","settingsSheet","closeSheet",
-    "setQuality","qualitySub","setSound","setEnhance","setSuggest","setAuto","setMirror","setGrid",
+    "setQuality","qualitySub","setSound","setEnhance","setSuggest","setAuto","setMirror","setGrid","setDownload",
     "gallery","galleryBack","galleryGrid","viewer","viewerClose","viewerMedia","viewerInfo",
     "viewerShare","viewerDownload","viewerDelete",
     "sceneToast","sceneToastText","sceneAccept","sceneDismiss",
@@ -328,6 +328,7 @@ export function bindSettings() {
   el.setAuto.checked = s.autoShoot;
   el.setMirror.checked = s.mirrorSelfie;
   el.setGrid.checked = s.grid;
+  if (el.setDownload) el.setDownload.checked = s.autoDownload;
   el.blurSlider.value = s.portraitBlur; el.blurVal.textContent = s.portraitBlur;
   store.gridOn = s.grid;
   store.el.gridBtn.classList.toggle("on", s.grid);
@@ -346,6 +347,7 @@ export function bindSettings() {
     v.classList.toggle("mirror", store.currentFacing === "user" && s.mirrorSelfie);
   });
   bind(el.setGrid, "grid", () => { store.gridOn = s.grid; store.el.gridBtn.classList.toggle("on", s.grid); });
+  if (el.setDownload) bind(el.setDownload, "autoDownload");
 }
 
 // =========================================================
@@ -436,11 +438,7 @@ export function bindGallery() {
 }
 
 function updateThumbFromItem(item) {
-  const g = store.el.galleryThumb;
-  const url = URL.createObjectURL(item.thumbBlob || item.blob);
-  g.querySelector("img").src = url;
-  g.classList.remove("hidden");
-  g.querySelector(".badge-vid").style.display = item.type === "video" ? "block" : "none";
+  setGalleryThumb(item.thumbBlob || item.blob, item.type === "video");
 }
 
 async function openGallery() {
