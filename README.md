@@ -85,6 +85,23 @@ python3 -m http.server 8000
 
 Mọi đường dẫn trong app đều **tương đối** (`./`) nên chạy đúng trên subpath repo.
 
+## ▲ Deploy Vercel (link ngay từ GitHub)
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/hungnq131193-ux/camera)
+
+**Cách 1 — bấm nút trên (nhanh nhất):** đăng nhập Vercel → clone repo → nhận
+link `https://<project>.vercel.app` chạy HTTPS (camera + Service Worker OK).
+
+**Cách 2 — kết nối repo GitHub:**
+1. Vào [vercel.com/new](https://vercel.com/new) → **Import** repo `hungnq131193-ux/camera`.
+2. Framework Preset để **Other** (app tĩnh, không build). Bỏ trống Build Command
+   & Output Directory.
+3. **Deploy** → mỗi lần `git push` Vercel tự build lại (Preview cho nhánh, Production cho `main`).
+
+File [`vercel.json`](./vercel.json) đã cấu hình sẵn: header `Service-Worker-Allowed: /`
+cho `sw.js`, đúng `Content-Type` cho `manifest.json`, và `Permissions-Policy` mở
+quyền camera/mic — nên PWA + offline hoạt động luôn không cần chỉnh thêm.
+
 ## 📴 Test offline
 
 1. Mở link **1 lần khi có mạng** → chờ badge AI **"AI sẵn sàng"** (đã cache model).
