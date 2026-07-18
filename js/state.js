@@ -14,6 +14,8 @@ const DEFAULT_SETTINGS = {
   mirrorSelfie: true,
   grid: true,
   portraitBlur: 14,   // mức xoá phông (0–25)
+  autoDownload: true, // tự tải JPEG về thư mục Tải xuống
+  hdrMode: false,     // HDR bracketing (mode Ảnh, cần EV)
 };
 
 function loadSettings() {
@@ -64,8 +66,10 @@ export const store = {
 
   // Render loop
   lastVideoTime: -1,
+  lastDetectMs: 0,           // throttle detect ~12Hz
   lastGuideMsg: "",
-  goodStreak: 0,              // cho auto-shoot
+  goodStreak: 0,             // cho auto-shoot
+  darkStreak: 0,             // gợi ý Đêm cần vài mẫu tối liên tiếp
   busy: false,               // đang chụp/xử lý
 
   // Recording
@@ -76,10 +80,10 @@ export const store = {
 };
 
 // ------- Constant model URLs (phải KHỚP với sw.js) -------
-export const MP_VER = "0.10.14";
+export const MP_VER = "0.10.22";
 export const MP_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VER}`;
 export const MODELS = {
-  object: "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite",
+  object: "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite2/float16/1/efficientdet_lite2.tflite",
   face:   "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite",
   segmenter: "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite",
 };

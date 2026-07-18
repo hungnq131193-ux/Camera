@@ -33,7 +33,7 @@ export async function initObjectDetector(setAiStatus) {
     const { ObjectDetector } = store._mp;
     store.objectDetector = await createWithFallback(
       (o) => ObjectDetector.createFromOptions(fileset, o),
-      { baseOptions: { modelAssetPath: MODELS.object }, runningMode: "VIDEO", scoreThreshold: 0.5, maxResults: 5 }
+      { baseOptions: { modelAssetPath: MODELS.object }, runningMode: "VIDEO", scoreThreshold: 0.4, maxResults: 5 }
     );
     setAiStatus && setAiStatus("ready", "AI sẵn sàng");
     return store.objectDetector;
@@ -74,8 +74,8 @@ export async function initSegmenter() {
       {
         baseOptions: { modelAssetPath: MODELS.segmenter },
         runningMode: "IMAGE",
-        outputCategoryMask: true,
-        outputConfidenceMasks: false,
+        outputCategoryMask: false,
+        outputConfidenceMasks: true,
       }
     );
     return store.segmenter;
